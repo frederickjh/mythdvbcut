@@ -2,6 +2,9 @@
 
 # Copyright (C) 2013 John Pilkington 
 # Uses ideas from scripts posted by Tino Keitel and Kees Cook in the Mythtv lists.
+# The suggestion to convert HD files to .mkv, and code to do it, came from Michael Stucky.
+
+# **** I have not tried running this script on an .mkv file that it has created *****
 
 # Usage: "$0" <recording>   ...or...
 # ionice -c3 ./"$0" <recording> will reduce io priority and is recommended.
@@ -18,7 +21,10 @@
 # For non-mpeg2video all streams are passed through unchanged, but with cuts applied at the video keyframes.  
   
 # It then clears the cutlist, updates the filesize in the database, rebuilds the seek table and creates a new preview.
-# The result should be acceptable as a recording within MythTV and perhaps as an input to MythArchive.
+
+# If the script is edited to have MAKEMKV=false, the result should be acceptable as a recording within MythTV
+# and perhaps as an input to MythArchive.  After MAKEMKV=true the file must be treated as a Video.
+
 # The logfile includes the positions in the new file at which deletions have been made. 
 
 # The script needs to be edited to define some local variables and folders.  
@@ -49,23 +55,30 @@ DBPassword="mythtv"
 DBLocalHostName="localhost" 
 DBName="mythconverg"
 
-# TESTRUN is initially set to true.  No changes will be made to the input file.
+ 
+BN="$1"     # "Basename" of file as given in the command line but without special attributes.
 
-TESTRUN=true    # cutlists will be shown but the recording will be unchanged 
-#TESTRUN=false   # the recording will be processed
+MAKEMKV=false   # after ProjectX use mplex to create a DVD profile file
+# mplex fails with higher bitrates, but mkv can cope.
+# MAKEMKV=true     # after ProjectX create an .mkv file
+
+# If TESTRUN is set to true, no changes will be made to the input file.
+
+# TESTRUN=true    # cutlists will be shown but the recording will be unchanged 
+TESTRUN=false   # the recording will be processed
 if [ $TESTRUN != "false" ] ; then TESTRUN=true
 fi
 #CUTMODE="FRAMECOUNT"  # Not used here.
 CUTMODE="BYTECOUNT"
 
-USEPJX=true  # Will be set to false if not mpeg2video
+USEPJX=true  # Will be set to false if not mpeg2video (Main)
 TIMEOUT=20   # Longest 'thinking time' in seconds allowed before adopting the automatically selected audio stream.
 
 # Variables RECDIR1, TEMPDIR1, RECDIR2, TEMPDIR2, LOGDIR, PROJECTX, HOST1, HOST2 need to be customised.
 # The TEMPDIRs are used to hold the demuxed recording, so should have a few GiB available. 
 
 HOST1="PresV5000"  # laptop with single disk, SL6, MythTV 0.26-fixes FE/BE
-HOST2="gateway12"  # twin-disk box, Fedora 16, MythTV 0.25.3 FE/BE
+HOST2="gateway12"  # twin-disk box, Fedora 17, MythTV 0.26-fixes FE/BE
 
 if [ $HOSTNAME = ${HOST1} ] ; then
 
@@ -102,7 +115,7 @@ else
    exit 1
 fi 
 
-if [ "$1" = "-h" ] || [ "$1" = "--help" ] ; then
+if [ "$BN" = "-h" ] || [ "$BN" = "--help" ] ; then
 echo "Usage: "$0" <recording>"
 echo "<recording> is a file recorded by MythTV with a valid DB entry and seektable."
 echo "e.g. 1234_20100405123400.mpg in one of the defined RECDIRs"
@@ -112,12 +125,12 @@ fi
 
 # exit if .old file exists
 
-if  [ -f ${RECDIR1}/"$1".old ] ; then 
-    echo " ${RECDIR1}/"$1".old exists: giving up." ; exit 1
+if  [ -f ${RECDIR1}/"$BN".old ] ; then 
+    echo " ${RECDIR1}/"$BN".old exists: giving up." ; exit 1
 fi
 
-if  [ -f ${RECDIR2}/"$1".old ] ; then 
-    echo " ${RECDIR2}/"$1".old exists: giving up." ; exit 1
+if  [ -f ${RECDIR2}/"$BN".old ] ; then 
+    echo " ${RECDIR2}/"$BN".old exists: giving up." ; exit 1
 fi
  
 # Customize with paths to alternative recording and temp folders
@@ -125,12 +138,12 @@ fi
 cd ${RECDIR1}
 RECDIR=${RECDIR1}
 TEMP=${TEMPDIR1}
-if  [ ! -f "$1" ] ; then
+if  [ ! -f "$BN" ] ; then
   cd ${RECDIR2}
   RECDIR=${RECDIR2}
   TEMP=${TEMPDIR2} 
-     if  [ ! -f "$1" ] ; then 
-       echo " "$1" not found.  Giving up"
+     if  [ ! -f "$BN" ] ; then 
+       echo " "$BN" not found.  Giving up"
        cd ~
        exit 1
      fi
@@ -139,12 +152,14 @@ fi
 # Is it an mpeg-2 recording?
 echo
 echo
-mythffmpeg -i "$1" 2>&1 | grep -C 4 Video | tee "temp$$.txt"
+#mythffmpeg -i "$BN" 2>&1 | grep -C 4 Video | tee "temp$$.txt"
+#mythffmpeg -i "$BN" 2>&1 | grep -B 2 -A 4 Video | tee "temp$$.txt"
+mythffmpeg -i "$BN" 2>&1 | grep -B 2 -A 4 "mpeg2video (Main)" | tee "temp$$.txt"
 
-mpeg=$(grep -c "mpeg2video" temp$$.txt) 
-echo "mpeg2video stream count:  $mpeg"
+mpeg=$(grep -c "mpeg2video (Main)" temp$$.txt) 
+echo "mpeg2video (Main) stream count:  $mpeg"
 if [ $mpeg != 1 ] ; then 
-  echo "Not mpeg2, or no or multiple video streams"
+  echo "Not mpeg2video (Main), or no or multiple video streams"
   if [ $mpeg = 0 ] ; then
      USEPJX=false  # really ought to see if it's a radio channel.
   else
@@ -164,7 +179,7 @@ then
 #    Stream #0.1[0xc0](deu): Audio: mp2, 48000 Hz, 2 channels, s16, 256 kb/s
 
    # Thanks to Christopher Meredith for the basic parsing magic here. 
-   VPID=`grep Video  temp$$.txt | head -n1 | cut -f 1,1 -d']' | sed 's+.*\[++g'`
+   VPID=`grep "mpeg2video (Main)"  temp$$.txt | head -n1 | cut -f 1,1 -d']' | sed 's+.*\[++g'`
    # It has to be tweaked for multiple audio streams.  This (with head -n1 ) selects the first listed by ffmpeg.
    # You may alternatively wish to select for language, format, etc.   May be channel, programme, user dependent.
    APID=`grep Audio  temp$$.txt | head -n1 | cut -f 1,1 -d']' | sed 's+.*\[++g'`
@@ -203,10 +218,10 @@ fi
 
 # Now do the actual processing
 # chanid and starttime identify the recording in the DB
-chanid=$(echo "select chanid from recorded where basename=\"$1\";" |
+chanid=$(echo "select chanid from recorded where basename=\"$BN\";" |
 mysql -N -u${DBUserName} -p${DBPassword} -h${DBLocalHostName} $DBName )
 
-starttime=$(echo "select starttime from recorded where basename=\"$1\";" |
+starttime=$(echo "select starttime from recorded where basename=\"$BN\";" |
 mysql -N -u${DBUserName} -p${DBPassword} -h${DBLocalHostName} $DBName )
 
 #exit
@@ -336,7 +351,7 @@ rm  tmp2$$  tmp3$$
 # Editing may be frame-accurate if edit-points are the first or last keyframes
 # for which a wanted picture is displayed.
 
-FILESIZE=$( du -bL "$1" | cut -f 1 )
+FILESIZE=$( du -bL "$BN" | cut -f 1 )
 
 echo -e "\nCreating the cutlist for Project-X with 188 byte adjustment" >> log$$
 cut -f1 tmp$$ > PXraw$$
@@ -392,8 +407,8 @@ cat PXadj$$ | tr "\n" " " > bytelist$$
 echo >> bytelist$$
 
 # Prepare pyscript$$, the script that would run pycut.py
-echo -e " #!/bin/bash\n mv  '$RECDIR/$1' '$RECDIR/$1.old' "  > pyscript$$
-echo -en " ionice -c3 ~/pycut.py '$RECDIR/$1.old' '$RECDIR/$1' " >> pyscript$$
+echo -e " #!/bin/bash\n mv  '$RECDIR/$BN' '$RECDIR/$BN.old' "  > pyscript$$
+echo -en " ionice -c3 ~/pycut.py '$RECDIR/$BN.old' '$RECDIR/$BN' " >> pyscript$$
 cat bytelist$$  >>  pyscript$$  
 
 rm PXraw$$ PXadj$$ 
@@ -450,6 +465,7 @@ fi
 # Now do the actual cutting and concatenation
 
 TEMPHEAD=$TEMP/tempcut${$}
+OUTFILE="$BN"
 
 if ${USEPJX} ; then
 
@@ -458,11 +474,10 @@ if ${USEPJX} ; then
    # For mpeg2 format only....
    # use ProjectX to de-multiplex selected streams with the created cutlist
 
-   mv  "$1" "$1".old
-   
-   CMD="ionice -c3 java -jar "$PROJECTX" -name tempcut$$ -id ${VPID},${APID} \
-   -out $TEMP -cut projx$$ "$1".old"
+   mv  "$BN" "$BN".old
 
+   CMD="ionice -c3 java -jar "$PROJECTX" -name tempcut$$ -id ${VPID},${APID} \
+   -out $TEMP -cut projx$$ "$BN".old"
    echo "running: "${CMD}""
    ${CMD}
    # 
@@ -478,13 +493,29 @@ if ${USEPJX} ; then
        TEMPAUDIO=$TEMPHEAD.ac3
    fi
 
-   # Now remux.  mplex -f 8, mplex -f 9 both use DVD profile. 
-   # mplex -f 8 inserts blank DVD-nav sectors, -f 9 does not.  
-   # Neither plays as a 'Recording' via uPnP on my Panasonic TV.
+   if ! ${MAKEMKV} ; then
 
-   CMD="ionice -c3  mplex -o "$1" -V -f 9 $TEMPHEAD.m2v $TEMPAUDIO" 
-   echo "running: ${CMD}"
-   ${CMD}
+     # Now remux.  mplex -f 8, mplex -f 9 both use DVD profile. 
+     # mplex -f 8 inserts blank DVD-nav sectors, -f 9 does not.  
+     # Neither plays as a 'Recording' via uPnP on my Panasonic TV.
+
+     CMD="ionice -c3  mplex -o "$OUTFILE" -V -f 9 $TEMPHEAD.m2v $TEMPAUDIO" 
+     echo "running: ${CMD}"
+     ${CMD}
+   else
+     # Remux to .mkv
+     # This does play as a recording via uPnP but won't seek or skip in Mythfrontend.
+
+     OUTFILE=$( echo $BN | sed 's/mpg/mkv/')
+     echo "Newfile name will be:  $OUTFILE "
+     CMD="ionice -c3 mythffmpeg -fflags +genpts -i $TEMPHEAD.m2v -i $TEMPAUDIO -vcodec copy -acodec copy $OUTFILE " 
+     echo "running: ${CMD}"
+     ${CMD}
+
+     # tell mythDB about new filename
+     echo "update recorded set basename='${OUTFILE}' where chanid=$chanid and starttime='$starttime';" |
+     mysql -N -u${DBUserName} -p${DBPassword} -h${DBLocalHostName} ${DBName}
+   fi
 
    CMD="rm  $TEMPHEAD.m2v   $TEMPAUDIO "  # Large; usually best to remove these. 
    echo "running: "${CMD}""
@@ -512,18 +543,18 @@ ${CMD}
 echo -e "Cutlist has been cleared.\n" 
 
 #rebuild seek table; this now also resets filesize in DB 
-CMD="ionice -c3 mythcommflag -q --rebuild --file $1 "
+CMD="ionice -c3 mythcommflag -q --rebuild --file $OUTFILE "
 echo "running: "${CMD}""
 ${CMD}
 #echo -e "Seek table has been rebuilt.\n"
 
 #echo  "The cutlist was applied in ** "$CUTMODE" ** mode."
-echo -e "Output file is $1. \n" 
+echo -e "Output file is $OUTFILE. \n" 
 
 # Get tech details of output file into the log.
-echo -e "\nRunning:  mythffmpeg -i "$1" 2>&1 | grep -C 4 Video" | tee -a log$$
+echo -e "\nRunning:  mythffmpeg -i "$OUTFILE" 2>&1 | grep -C 4 Video" | tee -a log$$
 echo
-mythffmpeg -i "$1" 2>&1 | grep -C 4 Video | tee -a log$$
+mythffmpeg -i "$OUTFILE" 2>&1 | grep -C 4 Video | tee -a log$$
 echo
 
 CMD="grep -A 2 Switch log$$ " # put outfile switchpoint info onto terminal
@@ -537,10 +568,10 @@ grep 'cut-' ${TEMPHEAD}_log.txt
 cat log$$ >> ${TEMPHEAD}_log.txt
 
 echo -e "\nWhile the .old file still exists you can examine it with\n
-hexdump -C -n 40 -s {byteoffset} ${RECDIR}/$1.old\n
-On my 32-bit installation, hexdump truncates start offsets > 2 GiB.\n "
+hexdump -C -n 40 -s {byteoffset} ${RECDIR}/$BN.old\n
+On my 32-bit installation, hexdump misinterprets start offsets > 2 GiB.\n "
 
-CMD="mv ${TEMPHEAD}_log.txt  ${LOGDIR}/$1.PXcut$$.txt"
+CMD="mv ${TEMPHEAD}_log.txt  ${LOGDIR}/$OUTFILE.PXcut$$.txt"
 echo "running: "${CMD}""
 ${CMD}
 
@@ -555,6 +586,8 @@ rm log$$
 cd ~
 
 # mythpreviewgen isn't essential here so put it where failure won't cause other problems.
+# Creates a blank frame from .mkv file.
+
 CMD="ionice -c3 mythpreviewgen --chanid "$chanid" --starttime "$starttime" -q "
 echo "running: "${CMD}""
 ${CMD}
